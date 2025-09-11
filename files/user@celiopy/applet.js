@@ -182,7 +182,10 @@ class CinnamonUserApplet extends Applet.TextIconApplet {
             let icon = new St.Icon({ icon_name: iconName, icon_type: St.IconType.SYMBOLIC, style_class: "system-status-icon" });
             btn.set_child(icon);
             new Tooltips.Tooltip(btn, tooltip);
-            btn.connect("clicked", callback);
+            btn.connect("clicked", () => {
+                callback();
+                this.menu.toggle();
+            });
             this.sessionButtonsBox.add_child(btn);
         };
 
@@ -226,7 +229,9 @@ class CinnamonUserApplet extends Applet.TextIconApplet {
             "night-light-symbolic",
             _("Night Light"),
             this._schemas.color,
-            "night-light-enabled"
+            "night-light-enabled",
+            null,
+            "nightlight"
         );
         this._addToggleToGrid(this.nightLightToggle.actor);
 
@@ -236,7 +241,8 @@ class CinnamonUserApplet extends Applet.TextIconApplet {
             _("Prevent Sleep"),
             null,
             null,
-            (active) => this._togglePreventSleep(active)
+            (active) => this._togglePreventSleep(active),
+            "power"
         );
         this._addToggleToGrid(this.preventSleepToggle.actor);
 
@@ -246,7 +252,8 @@ class CinnamonUserApplet extends Applet.TextIconApplet {
             _("Power Mode"),
             null,
             null,
-            () => this._togglePowerMode()
+            () => this._togglePowerMode(),
+            "power"
         );
         this._addToggleToGrid(this.powerModeToggle.actor);
 
@@ -255,7 +262,7 @@ class CinnamonUserApplet extends Applet.TextIconApplet {
     }
 
     // === Cria toggle com container extra para botão ===
-    _createToggle(iconName, labelText, settingsObj = null, settingsKey = null, onChange = null) {
+    _createToggle(iconName, labelText, settingsObj = null, settingsKey = null, onChange = null, settingsUri = null) {
         let toggleBox = new St.BoxLayout({ vertical: true, style_class: "settings-toggle-box", x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER, x_expand: false, y_expand: false });
         let buttonContainer = new St.BoxLayout({ style_class: "settings-toggle-icon-container", x_align: Clutter.ActorAlign.CENTER, y_align: Clutter.ActorAlign.CENTER });
 
@@ -300,6 +307,17 @@ class CinnamonUserApplet extends Applet.TextIconApplet {
 
             if (onChange) onChange(newValue);
         });
+
+        if (settingsUri) {
+            button.connect("button-press-event", (actor, event) => {
+                if (event.get_button() === 2) { // Middle-click
+                    Util.spawnCommandLine(`cinnamon-settings ${settingsUri}`);
+                    this.menu.toggle();
+                    return Clutter.EVENT_STOP;
+                }
+                return Clutter.EVENT_PROPAGATE;
+            });
+        }
 
         return { actor: toggleBox, button, icon, label };
     }
