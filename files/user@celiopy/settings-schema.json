@@ -51,8 +51,8 @@
     },
     "keyOpen": {
         "type": "keybinding",
-        "description": "Show user session actions",
+        "description": "Show menu",
         "default": "<Super>s",
-        "tooltip": "Set keybinding(s) to show user session actions."
+        "tooltip": "Set keybinding(s) to show menu."
     }
 }

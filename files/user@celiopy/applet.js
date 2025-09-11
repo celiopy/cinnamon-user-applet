@@ -2,6 +2,7 @@ const Applet = imports.ui.applet;
 const St = imports.gi.St;
 const PopupMenu = imports.ui.popupMenu;
 const Util = imports.misc.util;
+const Lang = imports.lang;
 const GLib = imports.gi.GLib;
 const Gio = imports.gi.Gio;
 const AccountsService = imports.gi.AccountsService;
@@ -12,11 +13,22 @@ const UserWidget = imports.ui.userWidget;
 const Main = imports.ui.main;
 const Tooltips = imports.ui.tooltips;
 const Clutter = imports.gi.Clutter;
+const Gettext = imports.gettext;
 const Slider = imports.ui.slider;
 
-const UUID = 'user@celiopy'; // Substitua pelo UUID real
+const UUID = 'user@celiopy';
 const APPLET_DIR = imports.ui.appletManager.appletMeta[UUID].path;
 const DIALOG_ICON_SIZE = 32;
+
+const INHIBIT_IDLE_FLAG = 8;
+const INHIBIT_SLEEP_FLAG = 4;
+
+// l10n/translation support
+Gettext.bindtextdomain(UUID, GLib.get_home_dir() + "/.local/share/locale");
+
+function _(str) {
+  return Gettext.dgettext(UUID, str);
+}
 
 class CinnamonUserApplet extends Applet.TextApplet {
     constructor(orientation, panel_height, instance_id) {
@@ -27,7 +39,8 @@ class CinnamonUserApplet extends Applet.TextApplet {
         this._panel_icon_box = new St.Bin();
         this._panel_icon_box.set_alignment(St.Align.MIDDLE, St.Align.MIDDLE);
         this.actor.insert_child_at_index(this._panel_icon_box, 0);
-
+        
+        this.sessionCookie = null;
         this._panel_avatar = null;
 
         // Inicializa schemas, bindings, UI e toggles
@@ -64,7 +77,15 @@ class CinnamonUserApplet extends Applet.TextApplet {
     // === Inicializa UI do menu e painel ===
     _initUI(orientation) {
         // Sessão
-        this._session = new GnomeSession.SessionManager();
+        this.sessionProxy = null;
+        this._session = new GnomeSession.SessionManager(Lang.bind(this, function(proxy, error) {
+            if (error) {
+                global.logError("Error initializing session proxy: " + error.message);
+                return;
+            }
+            this.sessionProxy = proxy;
+            global.log("Session proxy initialized successfully");
+        }));
         this._screenSaverProxy = new ScreenSaver.ScreenSaverProxy();
 
         // Menu
@@ -77,10 +98,10 @@ class CinnamonUserApplet extends Applet.TextApplet {
         this.interfaceSection = new PopupMenu.PopupMenuSection();
         this.sessionSection = new PopupMenu.PopupMenuSection();
 
-        [this.prefsSection, this.interfaceSection, this.sessionSection].forEach(section => {
-            this.menu.addMenuItem(section);
-            this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
-        });
+        this.menu.addMenuItem(this.prefsSection);
+        this.menu.addMenuItem(this.interfaceSection);
+        this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+        this.menu.addMenuItem(this.sessionSection);
 
         // Grid de toggles (3 colunas)
         this.prefsGrid = new St.Widget({
@@ -162,8 +183,13 @@ class CinnamonUserApplet extends Applet.TextApplet {
             this.sessionButtonsBox.add_child(btn);
         };
 
+        // System Settings
+        addBtn("gnome-system-symbolic", _("Settings"), () => {
+            Util.spawnCommandLine("cinnamon-settings");
+        });
+
         // Lock
-        addBtn("system-lock-screen", _("Lock"), () => {
+        addBtn("system-lock-screen", _("Lock Screen"), () => {
             let screensaver_file = Gio.file_new_for_path("/usr/bin/cinnamon-screensaver-command");
             if (screensaver_file.query_exists(null)) {
                 let ask = this._schemas.screensaver.get_boolean("ask-for-away-message");
@@ -174,10 +200,10 @@ class CinnamonUserApplet extends Applet.TextApplet {
         });
 
         // Logout
-        addBtn("system-log-out", _("Logout"), () => this._session.LogoutRemote(0));
+        addBtn("system-log-out", _("Log Out"), () => this._session.LogoutRemote(0));
 
         // Shutdown
-        addBtn("system-shutdown", _("Shutdown"), () => this._session.ShutdownRemote());
+        addBtn("system-shutdown", _("Shut Down"), () => this._session.ShutdownRemote());
     }
 
     // === Inicializa toggles do applet ===
@@ -185,7 +211,7 @@ class CinnamonUserApplet extends Applet.TextApplet {
         // Dark Mode (applet setting)
         this.darkModeToggle = this._createToggle(
             "weather-clear-night-symbolic",
-            _("Dark Mode"),
+            _("Dark mode"),
             this.settings,
             "dark-mode",
             (newValue) => this._setDarkMode(newValue)
@@ -194,16 +220,22 @@ class CinnamonUserApplet extends Applet.TextApplet {
 
         // Night Light (Gio.Settings)
         this.nightLightToggle = this._createToggle(
-            "weather-clear-night-symbolic",
+            "night-light-symbolic",
             _("Night Light"),
             this._schemas.color,
             "night-light-enabled"
         );
         this._addToggleToGrid(this.nightLightToggle.actor);
 
-        // Fake toggle para preencher espaço
-        let fakeToggle = this._createToggle("preferences-system-symbolic", _("Placeholder"));
-        this._addToggleToGrid(fakeToggle.actor);
+        // Prevent Sleep toggle
+        this.preventSleepToggle = this._createToggle(
+            "preferences-desktop-screensaver-symbolic",
+            _("Prevent Sleep"),
+            null,
+            null,
+            (active) => this._togglePreventSleep(active)
+        );
+        this._addToggleToGrid(this.preventSleepToggle.actor);
 
         // Text scaling slider
         this._initTextScaling();
@@ -237,15 +269,26 @@ class CinnamonUserApplet extends Applet.TextApplet {
             } else if (settingsObj instanceof Settings.AppletSettings) {
                 settingsObj.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, settingsKey, "_dummy", updateState, null);
             }
+        }
 
-            button.connect("clicked", () => {
+        // MOVE THE CLICKED HANDLER OUTSIDE THE if BLOCK
+        // So it works for both settings-based and custom toggles
+        button.connect("clicked", () => {
+            let newValue;
+            if (settingsObj && settingsKey) {
+                // Settings-based toggle
                 let current = (settingsObj instanceof Gio.Settings) ? settingsObj.get_boolean(settingsKey) : settingsObj.getValue(settingsKey);
-                let newValue = !current;
+                newValue = !current;
                 if (settingsObj instanceof Gio.Settings) settingsObj.set_boolean(settingsKey, newValue);
                 else settingsObj.setValue(settingsKey, newValue);
-                if (onChange) onChange(newValue);
-            });
-        }
+            } else {
+                // Custom toggle: manually flip
+                newValue = !button._activeState;
+                button._activeState = newValue; // store state manually
+            }
+
+            if (onChange) onChange(newValue);
+        });
 
         return { actor: toggleBox, button, icon, label };
     }
@@ -263,8 +306,7 @@ class CinnamonUserApplet extends Applet.TextApplet {
 
     // === Inicializa slider de text scaling ===
     _initTextScaling() {
-        const FACTORS = [0.9, 1.0, 1.1];
-        const WEIGHTS = [1, 2, 3]; // quantas colunas cada fator ocupa
+        const FACTORS = [0.9, 1.0, 1.1, 1.2, 1.3];
         const MAX_INDEX = FACTORS.length - 1;
 
         let currentFactor = this._schemas.interface.get_double("text-scaling-factor");
@@ -298,7 +340,7 @@ class CinnamonUserApplet extends Applet.TextApplet {
         const updateFakeSlider = (idx) => {
             track.remove_all_children();
 
-            let weight = WEIGHTS[idx];
+            let weight = (idx + 1);
 
             // Fill ocupa "weight" colunas
             track.add_child(fill);
@@ -309,6 +351,19 @@ class CinnamonUserApplet extends Applet.TextApplet {
                 let spacer = new St.BoxLayout({ x_expand: true });
                 track.add_child(spacer);
                 grid.attach(spacer, weight, 0, FACTORS.length - weight, 1);
+            }
+
+            // === Marcador fixo no 1.0 ===
+            let markerIndex = FACTORS.indexOf(1.0);
+            if (markerIndex >= 0) {
+                let marker = new St.BoxLayout({
+                    style_class: "fake-slider-marker",
+                    x_expand: false,
+                    y_expand: false,
+                    x_align: Clutter.ActorAlign.END
+                });
+                track.add_child(marker);
+                grid.attach(marker, markerIndex, 0, 1, 1);
             }
         };
         
@@ -335,7 +390,7 @@ class CinnamonUserApplet extends Applet.TextApplet {
 
         // Botões de menos/mais
         let minusBtn = new St.Button({ style_class: "system-button", reactive: true, can_focus: true, track_hover: true });
-        minusBtn.set_child(new St.Icon({ icon_name: 'list-remove-symbolic', icon_type: St.IconType.SYMBOLIC, style_class: "system-status-icon" }));
+        minusBtn.set_child(new St.Icon({ icon_name: 'format-text-rich-symbolic', icon_type: St.IconType.SYMBOLIC, style_class: "system-status-icon" }));
         minusBtn.connect("clicked", () => setScale(idx - 1));
 
         let plusBtn = new St.Button({ style_class: "system-button icon-large", reactive: true, can_focus: true, track_hover: true });
@@ -365,6 +420,39 @@ class CinnamonUserApplet extends Applet.TextApplet {
         this._darkMode = dark;
     }
 
+    // === Toggle Prevent Sleep ===
+    _togglePreventSleep(active) {
+        if (active) {
+            // Activate prevent sleep
+            this.sessionProxy.InhibitRemote(
+                "inhibit@cinnamon.org",
+                0,
+                "prevent system sleep and suspension",
+                INHIBIT_SLEEP_FLAG,
+                Lang.bind(this, function(cookie) {
+                    this.sessionCookie = cookie;
+                    global.log("Prevent sleep activated, cookie: " + cookie);
+                    // Ensure UI reflects the active state
+                    this.preventSleepToggle.button.checked = true;
+                })
+            );
+        } else if (this.sessionCookie) {
+            // Deactivate prevent sleep
+            this.sessionProxy.UninhibitRemote(
+                this.sessionCookie, 
+                Lang.bind(this, function() {
+                    global.log("Prevent sleep deactivated");
+                    this.sessionCookie = null;
+                    // Ensure UI reflects the inactive state
+                    this.preventSleepToggle.button.checked = false;
+                })
+            );
+        } else {
+            // No cookie to uninhibit, just update UI
+            this.preventSleepToggle.button.checked = false;
+        }
+    }
+
     // === Keybinding ===
     _setKeybinding() {
         if (this.keybindingId) {
@@ -388,17 +476,24 @@ class CinnamonUserApplet extends Applet.TextApplet {
 
     _updatePanelIcon() {
         if (this.display_image) {
-            if (this._panel_avatar) this._panel_avatar.destroy();
+            if (this._panel_avatar != null) {
+                this._panel_avatar.destroy();
+            }
+
             this._panel_avatar = new UserWidget.Avatar(this._user, { iconSize: this.getPanelIconSize(St.IconType.FULLCOLOR) });
             this._panel_icon_box.set_child(this._panel_avatar);
+            this._panel_avatar.update();
             this._panel_avatar.show();
         } else {
             if (this._panel_icon) this._panel_icon.destroy();
-            let iconPath = APPLET_DIR + "/icons/user-menu.svg";
-            let iconFile = Gio.file_new_for_path(iconPath);
-            this._panel_icon = iconFile.query_exists(null)
-                ? new St.Icon({ gicon: new Gio.FileIcon({ file: iconFile }), icon_size: this.getPanelIconSize(St.IconType.SYMBOLIC), style_class: "custom-panel-icon" })
-                : new St.Icon({ icon_name: 'preferences-desktop-symbolic', icon_type: St.IconType.SYMBOLIC, icon_size: this.getPanelIconSize(St.IconType.SYMBOLIC) });
+
+            this._panel_icon = new St.Icon({
+                icon_name: "user-menu-symbolic",
+                icon_type: St.IconType.SYMBOLIC,
+                icon_size: this.getPanelIconSize(St.IconType.SYMBOLIC),
+                style_class: "custom-panel-icon"
+            });
+
             this._panel_icon_box.set_child(this._panel_icon);
         }
     }
@@ -418,7 +513,18 @@ class CinnamonUserApplet extends Applet.TextApplet {
 
     on_applet_clicked() { this.menu.toggle(); }
 
-    on_applet_removed_from_panel() { this.settings.finalize(); }
+    on_applet_removed_from_panel() {
+        // Clean up inhibit cookie if active - FIXED variable name
+        if (this.sessionCookie !== null && this.sessionProxy) {
+            try {
+                this.sessionProxy.UninhibitRemote(this.sessionCookie);
+                global.log("Cleaned up prevent sleep cookie: " + this.sessionCookie);
+            } catch(e) {
+                global.logError("Erro ao limpar inhibit cookie: " + e);
+            }
+        }
+        this.settings.finalize();
+    }
 }
 
 function main(metadata, orientation, panel_height, instance_id) {
