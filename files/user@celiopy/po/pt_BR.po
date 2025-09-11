@@ -39,6 +39,19 @@ msgstr "Luz noturna"
 msgid "Prevent Sleep"
 msgstr "Impedir suspensão"
 
+#: applet.js:250
+msgid "Power Mode"
+msgstr "Modo de Energia"
+
+msgid "Power Saver"
+msgstr "Economia de Energia"
+
+msgid "Balanced"
+msgstr "Equilibrado"
+
+msgid "Performance"
+msgstr "Desempenho"
+
 # prefs
 msgid "Theme"
 msgstr "Tema"

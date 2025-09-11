@@ -30,23 +30,25 @@ function _(str) {
   return Gettext.dgettext(UUID, str);
 }
 
-class CinnamonUserApplet extends Applet.TextApplet {
+class CinnamonUserApplet extends Applet.TextIconApplet {
     constructor(orientation, panel_height, instance_id) {
         super(orientation, panel_height, instance_id);
         this.setAllowedLayout(Applet.AllowedLayout.BOTH);
-
-        // Containers do painel
-        this._panel_icon_box = new St.Bin();
-        this._panel_icon_box.set_alignment(St.Align.MIDDLE, St.Align.MIDDLE);
-        this.actor.insert_child_at_index(this._panel_icon_box, 0);
         
         this.sessionCookie = null;
-        this._panel_avatar = null;
+
+        this.set_applet_icon_symbolic_name('user-menu-symbolic');
+
+        // Mapa de modos
+        this._powerModes = {
+            "power-saver": { next: "balanced", label: _("Power Saver"), icon: "power-profile-power-saver" },
+            "balanced": { next: "performance", label: _("Balanced"),  icon: "power-profile-balanced" },
+            "performance": { next: "power-saver", label: _("Performance"),  icon: "power-profile-performance" }
+        };
 
         // Inicializa schemas, bindings, UI e toggles
         this._initSchemas();
         this._initUI(orientation);
-        this._initToggles();
 
         // Métodos iniciais
         this._onUserChanged();
@@ -60,8 +62,7 @@ class CinnamonUserApplet extends Applet.TextApplet {
         this.settings.bind("light-theme", "_lightTheme");
         this.settings.bind("dark-theme", "_darkTheme");
         this.settings.bind("keyOpen", "keyOpen", () => this._setKeybinding());
-        this.settings.bind("display-name", "disp_name", () => this._updateLabel());
-        this.settings.bind("display-image", "display_image", () => this._updatePanelIcon());
+        this.settings.bind("display-name", "display_name", () => this._updateLabels());
 
         // Schemas do sistema
         this._schemas = {
@@ -154,12 +155,12 @@ class CinnamonUserApplet extends Applet.TextApplet {
             Util.spawnCommandLine("cinnamon-settings user");
         });
 
-        let labelBox = new St.BoxLayout({ style_class: 'label-box', vertical: true, y_align: Clutter.ActorAlign.CENTER });
+        this._labelBox = new St.BoxLayout({ style_class: 'label-box', vertical: true, y_align: Clutter.ActorAlign.CENTER });
         this.userLabel = new St.Label({ style_class: 'user-label' });
         this.hostLabel = new St.Label({ style_class: 'host-label' });
-        labelBox.add(this.userLabel);
-        labelBox.add(this.hostLabel);
-        userBox.add(labelBox);
+        this._labelBox.add(this.userLabel);
+        this._labelBox.add(this.hostLabel);
+        userBox.add(this._labelBox);
 
         // Adiciona user info e spacer
         this.sessionContainer.add_child(userBox);
@@ -170,6 +171,8 @@ class CinnamonUserApplet extends Applet.TextApplet {
         this.sessionContainer.add_child(this.sessionButtonsBox);
 
         this._initSessionButtons();
+        this._initToggles();
+        this._initTextScaling();
     }
 
     // === Inicializa session buttons ===
@@ -184,7 +187,7 @@ class CinnamonUserApplet extends Applet.TextApplet {
         };
 
         // System Settings
-        addBtn("gnome-system-symbolic", _("Settings"), () => {
+        addBtn("applications-system", _("Settings"), () => {
             Util.spawnCommandLine("cinnamon-settings");
         });
 
@@ -237,8 +240,18 @@ class CinnamonUserApplet extends Applet.TextApplet {
         );
         this._addToggleToGrid(this.preventSleepToggle.actor);
 
-        // Text scaling slider
-        this._initTextScaling();
+        // Power Mode toggle (no settings key)
+        this.powerModeToggle = this._createToggle(
+            "power-profile-balanced", // ícone inicial
+            _("Power Mode"),
+            null,
+            null,
+            () => this._togglePowerMode()
+        );
+        this._addToggleToGrid(this.powerModeToggle.actor);
+
+        // Inicializa estado ao iniciar
+        this._updatePowerModeIcon();
     }
 
     // === Cria toggle com container extra para botão ===
@@ -260,15 +273,13 @@ class CinnamonUserApplet extends Applet.TextApplet {
             const updateState = () => {
                 let value = (settingsObj instanceof Gio.Settings) ? settingsObj.get_boolean(settingsKey) : settingsObj.getValue(settingsKey);
                 button.checked = value;
-                if (value) button.add_style_class_name("active"); else button.remove_style_class_name("active");
+
+                if (onChange) onChange(value);
             };
+
             updateState();
 
-            if (settingsObj instanceof Gio.Settings) {
-                settingsObj.connect(`changed::${settingsKey}`, updateState);
-            } else if (settingsObj instanceof Settings.AppletSettings) {
-                settingsObj.bindProperty(Settings.BindingDirection.BIDIRECTIONAL, settingsKey, "_dummy", updateState, null);
-            }
+            settingsObj.connect(`changed::${settingsKey}`, updateState);
         }
 
         // MOVE THE CLICKED HANDLER OUTSIDE THE if BLOCK
@@ -283,8 +294,8 @@ class CinnamonUserApplet extends Applet.TextApplet {
                 else settingsObj.setValue(settingsKey, newValue);
             } else {
                 // Custom toggle: manually flip
-                newValue = !button._activeState;
-                button._activeState = newValue; // store state manually
+                newValue = !button._active;
+                button._active = newValue; // store state manually
             }
 
             if (onChange) onChange(newValue);
@@ -390,11 +401,11 @@ class CinnamonUserApplet extends Applet.TextApplet {
 
         // Botões de menos/mais
         let minusBtn = new St.Button({ style_class: "system-button", reactive: true, can_focus: true, track_hover: true });
-        minusBtn.set_child(new St.Icon({ icon_name: 'format-text-rich-symbolic', icon_type: St.IconType.SYMBOLIC, style_class: "system-status-icon" }));
+        minusBtn.set_child(new St.Icon({ icon_name: 'format-text-size-decrease-symbolic', icon_type: St.IconType.SYMBOLIC, style_class: "system-status-icon" }));
         minusBtn.connect("clicked", () => setScale(idx - 1));
 
         let plusBtn = new St.Button({ style_class: "system-button icon-large", reactive: true, can_focus: true, track_hover: true });
-        plusBtn.set_child(new St.Icon({ icon_name: 'list-add-symbolic', icon_type: St.IconType.SYMBOLIC, style_class: "system-status-icon" }));
+        plusBtn.set_child(new St.Icon({ icon_name: 'format-text-size-increase-symbolic', icon_type: St.IconType.SYMBOLIC, style_class: "system-status-icon" }));
         plusBtn.connect("clicked", () => setScale(idx + 1));
 
         // Container final
@@ -407,6 +418,71 @@ class CinnamonUserApplet extends Applet.TextApplet {
 
         updateFakeSlider(idx);
     }
+    
+    _populateThemeOptions() {
+        let themes = {};
+        
+        const readThemesFromDir = (dir) => {
+            try {
+                let file = Gio.file_new_for_path(dir);
+                let enumerator = file.enumerate_children('standard::name', Gio.FileQueryInfoFlags.NONE, null);
+
+                let info;
+                while ((info = enumerator.next_file(null))) {
+                    let themeName = info.get_name();
+                    if (info.get_file_type() === Gio.FileType.DIRECTORY) {
+                        themes[themeName] = themeName;  // Use theme name as both key and value
+                    }
+                }
+            } catch (e) {
+                log(`Error reading themes from ${dir}: ${e.message}`);
+            }
+        };
+
+        // Read themes from both system and user directories
+        readThemesFromDir('/usr/share/themes');
+        readThemesFromDir(GLib.get_home_dir() + '/.themes');
+
+        // Clear existing options in the ComboBox (assuming you have a ComboBox defined)
+        this._clearComboBoxOptions();
+
+        // Add new options to the ComboBox
+        for (let theme in themes) {
+            this._addComboBoxOption(theme, theme); // Add each theme to the ComboBox
+        }
+
+        // Log found themes
+        if (Object.keys(themes).length === 0) {
+            log("No themes found.");
+        } else {
+            log(`Found themes: ${JSON.stringify(themes)}`);
+        }
+
+        // Set the options for light and dark themes
+        this.settings.setOptions("light-theme", themes);
+        this.settings.setOptions("dark-theme", themes);
+    }
+
+    _clearComboBoxOptions() {
+        // Clear the ComboBox options
+        // Assuming you have a reference to your ComboBox, for example:
+        if (this.lightThemeComboBox) {
+            this.lightThemeComboBox.remove_all();
+        }
+        if (this.darkThemeComboBox) {
+            this.darkThemeComboBox.remove_all();
+        }
+    }
+
+    _addComboBoxOption(value, label) {
+        // Add an option to the ComboBox
+        if (this.lightThemeComboBox) {
+            this.lightThemeComboBox.add_option(label, value);
+        }
+        if (this.darkThemeComboBox) {
+            this.darkThemeComboBox.add_option(label, value);
+        }
+    }
 
     // === Dark mode ===
     _setDarkMode(dark) {
@@ -418,6 +494,10 @@ class CinnamonUserApplet extends Applet.TextApplet {
         this._schemas.portal.set_string("color-scheme", colorScheme);
 
         this._darkMode = dark;
+        global.log(dark);
+        global.log(theme);
+
+        this._populateThemeOptions();
     }
 
     // === Toggle Prevent Sleep ===
@@ -461,57 +541,80 @@ class CinnamonUserApplet extends Applet.TextApplet {
         Main.keybindingManager.addHotKey("user-applet-open-" + this.instance_id, this.keyOpen, () => this._openMenu());
     }
 
-    _openMenu() { this.menu.toggle(); }
+    _openMenu() { this.menu.toggle(); this._updatePowerModeIcon(); }
 
     // === Atualiza labels e avatar ===
-    _updateLabel() {
-        if (this.disp_name) {
-            this.set_applet_label(this._user.get_real_name());
-            this._layoutBin.show();
+    _updateLabels() {
+        this.set_applet_label("");
+
+        if (this.display_name) {
+            // === UserBox ===
+            this.userLabel.set_text(this._user.get_real_name());
+            this.hostLabel.set_text(`${GLib.get_user_name()}@${GLib.get_host_name()}`);
+            this._labelBox.show();
         } else {
-            this.set_applet_label("");
-            this._layoutBin.hide();
-        }
-    }
-
-    _updatePanelIcon() {
-        if (this.display_image) {
-            if (this._panel_avatar != null) {
-                this._panel_avatar.destroy();
-            }
-
-            this._panel_avatar = new UserWidget.Avatar(this._user, { iconSize: this.getPanelIconSize(St.IconType.FULLCOLOR) });
-            this._panel_icon_box.set_child(this._panel_avatar);
-            this._panel_avatar.update();
-            this._panel_avatar.show();
-        } else {
-            if (this._panel_icon) this._panel_icon.destroy();
-
-            this._panel_icon = new St.Icon({
-                icon_name: "user-menu-symbolic",
-                icon_type: St.IconType.SYMBOLIC,
-                icon_size: this.getPanelIconSize(St.IconType.SYMBOLIC),
-                style_class: "custom-panel-icon"
-            });
-
-            this._panel_icon_box.set_child(this._panel_icon);
+            // === UserBox ===
+            this.userLabel.set_text("");
+            this.hostLabel.set_text("");
+            this._labelBox.hide();
         }
     }
 
     _onUserChanged() {
         if (this._user && this._user.is_loaded) {
             this.set_applet_tooltip(this._user.get_real_name());
-            let hostname = GLib.get_host_name();
-            this.hostLabel.set_text(`${GLib.get_user_name()}@${hostname}`);
-            this.userLabel.set_text(this._user.get_real_name());
-            this._userIcon.update();
 
-            this._updatePanelIcon();
-            this._updateLabel();
+            if (this.display_name) {
+                let hostname = GLib.get_host_name();
+                this.hostLabel.set_text(`${GLib.get_user_name()}@${hostname}`);
+                this.userLabel.set_text(this._user.get_real_name());
+            }
+
+            this._userIcon.update();
+            this._updateLabels();
         }
     }
 
-    on_applet_clicked() { this.menu.toggle(); }
+    // Alterna entre os modos
+    // Toggle
+    _togglePowerMode() {
+        this._getCurrentPowerMode((current) => {
+            let mode = this._powerModes[current] || this._powerModes["balanced"];
+
+            // Muda o modo de energia
+            Util.spawnCommandLine(`powerprofilesctl set ${mode.next}`);
+            this._updatePowerModeIcon();
+        });
+    }
+
+    // Atualiza ícone externo
+    _updatePowerModeIcon() {
+        this._getCurrentPowerMode((current) => {
+            let mode = this._powerModes[current] || this._powerModes["balanced"];
+            this.powerModeToggle.icon.icon_name = mode?.icon;
+            this.powerModeToggle.label.set_text(mode?.label);
+            let isPerformance = (current === "performance");
+            this.powerModeToggle.button.checked = isPerformance;
+        });
+    }
+
+    // Obtém modo atual do powerprofilesctl
+    _getCurrentPowerMode(callback) {
+        try {
+            let [res, out, err, status] = GLib.spawn_command_line_sync("powerprofilesctl get");
+            if (res && out) {
+                let mode = out.toString().trim();
+                callback(mode);
+            } else {
+                callback("balanced"); // fallback
+            }
+        } catch(e) {
+            global.logError("Erro ao obter power mode: " + e);
+            callback("balanced");
+        }
+    }
+
+    on_applet_clicked() { this._openMenu(); }
 
     on_applet_removed_from_panel() {
         // Clean up inhibit cookie if active - FIXED variable name

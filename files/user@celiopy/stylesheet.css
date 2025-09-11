@@ -1,6 +1,6 @@
 /* Session section layout */
 .session-container {
-    padding: 12px;
+    padding: 6px 12px;
     spacing: 12px;
 }
 
@@ -50,7 +50,7 @@
 }
 
 .system-button .system-status-icon {
-    icon-size: 12px;
+    icon-size: 14px;
 }
 
 /* Grid Layout */
@@ -112,4 +112,10 @@
     background-color: #ddffff; /* cor do marcador */
     width: 2px !important;
     border-radius: 1px;
+}
+
+.panel-icon-bin{
+    padding: 0 !important;
+    margin: 0 !important;
+    spacing: 0 !important;
 }
